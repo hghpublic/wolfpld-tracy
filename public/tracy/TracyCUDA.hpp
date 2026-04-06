@@ -661,18 +661,9 @@ namespace tracy
             ZoneScoped;
             tracy::SetThreadName("NVIDIA CUPTI Worker");
             CUptiResult status;
-            // Two-pass processing: GRAPH_TRACE records complete last on the GPU (after
-            // all their child kernels), so they appear at the end of the buffer. Process
-            // them first to populate the graphId->APICallInfo map before kernels look it up.
             CUpti_Activity* record = nullptr;
-            while (cuptiActivityGetNextRecord(buffer, validSize, &record) == CUPTI_SUCCESS) {
-                if (record->kind == CUPTI_ACTIVITY_KIND_GRAPH_TRACE)
-                    DoProcessDeviceEvent(record);
-            }
-            record = nullptr;
             while ((status = cuptiActivityGetNextRecord(buffer, validSize, &record)) == CUPTI_SUCCESS) {
-                if (record->kind != CUPTI_ACTIVITY_KIND_GRAPH_TRACE)
-                    DoProcessDeviceEvent(record);
+                DoProcessDeviceEvent(record);
             }
             if (status != CUPTI_ERROR_MAX_LIMIT_REACHED) {
                 CUptiCallChecked(status, "cuptiActivityGetNextRecord", TracyFile, TracyLine);
@@ -1015,12 +1006,19 @@ namespace tracy
                 CUpti_ActivityKernel9* kernel9 = (CUpti_ActivityKernel9*) record;
                 APICallInfo apiCall;
                 if (!matchActivityToAPICall(kernel9->correlationId, apiCall)) {
+                    // All kernels in one cuGraphLaunch share the launch's correlationId.
+                    // The first kernel consumes the cudaCallSiteInfo entry; subsequent
+                    // ones find the cached APICallInfo in cudaGraphCurrentLaunch[graphId].
                     uint32_t graphId = kernel9->graphId;
                     if (graphId == 0 || !PersistentState::Get().cudaGraphCurrentLaunch.fetch(graphId, apiCall)) {
                         return matchError(kernel9->correlationId, "KERNEL");
                     }
-                    // Don't erase cudaGraphCurrentLaunch: multiple kernels in the same
-                    // graph launch share this APICallInfo entry.
+                } else if (kernel9->graphId != 0) {
+                    // Cache the APICallInfo for the other kernels in this graph launch
+                    // that share the same correlationId (which was just erased above).
+                    auto& cache = PersistentState::Get().cudaGraphCurrentLaunch;
+                    cache.erase(kernel9->graphId);
+                    cache.emplace(kernel9->graphId, apiCall);
                 }
                 apiCall.host->EmitGpuZone(apiCall.start, apiCall.end, kernel9->start, kernel9->end, getKernelSourceLocation(kernel9->name), kernel9->contextId, kernel9->streamId);
                 auto latency_ms = (kernel9->start - apiCall.cupti) / 1'000'000.0;
@@ -1038,6 +1036,10 @@ namespace tracy
                     if (graphId == 0 || !PersistentState::Get().cudaGraphCurrentLaunch.fetch(graphId, apiCall)) {
                         return matchError(memcpy5->correlationId, "MEMCPY");
                     }
+                } else if (memcpy5->graphId != 0) {
+                    auto& cache = PersistentState::Get().cudaGraphCurrentLaunch;
+                    cache.erase(memcpy5->graphId);
+                    cache.emplace(memcpy5->graphId, apiCall);
                 }
                 static constexpr tracy::SourceLocationData TracyCUPTISrcLocDeviceMemcpy { "CUDA::memcpy", TracyFunction, TracyFile, (uint32_t)TracyLine, tracy::Color::Blue };
                 apiCall.host->EmitGpuZone(apiCall.start, apiCall.end, memcpy5->start, memcpy5->end, &TracyCUPTISrcLocDeviceMemcpy, memcpy5->contextId, memcpy5->streamId);
@@ -1057,6 +1059,10 @@ namespace tracy
                     if (graphId == 0 || !PersistentState::Get().cudaGraphCurrentLaunch.fetch(graphId, apiCall)) {
                         return matchError(memset4->correlationId, "MEMSET");
                     }
+                } else if (memset4->graphId != 0) {
+                    auto& cache = PersistentState::Get().cudaGraphCurrentLaunch;
+                    cache.erase(memset4->graphId);
+                    cache.emplace(memset4->graphId, apiCall);
                 }
                 static constexpr tracy::SourceLocationData TracyCUPTISrcLocDeviceMemset { "CUDA::memset", TracyFunction, TracyFile, (uint32_t)TracyLine, tracy::Color::Blue };
                 apiCall.host->EmitGpuZone(apiCall.start, apiCall.end, memset4->start, memset4->end, &TracyCUPTISrcLocDeviceMemset, memset4->contextId, memset4->streamId);
@@ -1130,18 +1136,6 @@ namespace tracy
                 }
                 break;
             }
-            case CUPTI_ACTIVITY_KIND_GRAPH_TRACE:
-            {
-                // Correlate the cuGraphLaunch API call to the graph's graphId so that
-                // kernel/memcpy/memset activities can look it up via their graphId field.
-                // cuGraphLaunch's correlationId == graphTrace->correlationId (per CUPTI docs).
-                auto* graphTrace = (CUpti_ActivityGraphTrace2*)record;
-                APICallInfo apiCall;
-                if (matchActivityToAPICall(graphTrace->correlationId, apiCall)) {
-                    PersistentState::Get().cudaGraphCurrentLaunch.emplace(graphTrace->graphId, apiCall);
-                }
-                break;
-            }
             case CUPTI_ACTIVITY_KIND_CUDA_EVENT :
             {
                 // NOTE(marcos): a byproduct of CUPTI_ACTIVITY_KIND_SYNCHRONIZATION
@@ -1176,7 +1170,10 @@ namespace tracy
             CUPTI_ACTIVITY_KIND_MEMSET,
             CUPTI_ACTIVITY_KIND_SYNCHRONIZATION,
             CUPTI_ACTIVITY_KIND_MEMORY2,
-            CUPTI_ACTIVITY_KIND_GRAPH_TRACE,
+            // NOTE: CUPTI_ACTIVITY_KIND_GRAPH_TRACE must NOT be enabled alongside
+            // CONCURRENT_KERNEL — enabling it suppresses per-kernel activity records
+            // for graph-launched kernels, replacing them with graph-level summaries.
+            //CUPTI_ACTIVITY_KIND_GRAPH_TRACE,
             //CUPTI_ACTIVITY_KIND_MEMCPY2,
             //CUPTI_ACTIVITY_KIND_OVERHEAD,
             //CUPTI_ACTIVITY_KIND_INTERNAL_LAUNCH_API,
