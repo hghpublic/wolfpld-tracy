@@ -388,7 +388,7 @@ static uint64_t ReadElfMinLoadVaddr( const char* path )
     {
         elf_phdr phdr;
         if( read( fd, &phdr, sizeof( phdr ) ) != sizeof( phdr ) ) break;
-        if( phdr.p_type == ExtPT_LOAD ) minVaddr = std::min( minVaddr, phdr.p_vaddr );
+        if( phdr.p_type == ExtPT_LOAD ) minVaddr = std::min( minVaddr, static_cast<uint64_t>(phdr.p_vaddr) );
     }
 
     close( fd );
