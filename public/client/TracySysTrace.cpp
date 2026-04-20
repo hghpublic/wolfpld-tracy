@@ -583,15 +583,19 @@ bool SysTraceStart( int64_t& samplingPeriod )
 #endif
 
     const auto paranoidLevelStr = ReadFile( "/proc/sys/kernel/perf_event_paranoid" );
-    if( !paranoidLevelStr ) return false;
-#ifdef TRACY_VERBOSE
-    int paranoidLevel = 2;
-    paranoidLevel = atoi( paranoidLevelStr );
+    if( !paranoidLevelStr ) {
+        TracyDebug( "Failed to read perf_event_paranoid, cannot setup system tracing." );
+        return false;
+    }
+    
+    const int paranoidLevel = atoi( paranoidLevelStr );
     TracyDebug( "perf_event_paranoid: %i", paranoidLevel );
-#endif
 
     auto traceFsPath = GetTraceFsPath();
-    if( !traceFsPath ) return false;
+    if( !traceFsPath ) {
+        TracyDebug( "Failed to get tracefs path, cannot setup system tracing." );
+        return false;
+    }
     TracyDebug( "tracefs path: %s", traceFsPath );
 
     int switchId = -1, wakingId = -1, vsyncId = -1;
