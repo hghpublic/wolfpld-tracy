@@ -566,10 +566,24 @@ static char* GetTraceFsPath()
         if( strcmp( ent->mnt_type, "tracefs" ) == 0 )
         {
             auto len = strlen( ent->mnt_dir );
-            ret = (char*)tracy_malloc( len + 1 );
+            // ret may be != nullptr if we already saw a debugfs entry
+            ret = (char*)tracy_realloc( ret, len + 1 );
             memcpy( ret, ent->mnt_dir, len );
             ret[len] = '\0';
             break;
+        }
+        else if( strcmp( ent->mnt_type, "debugfs" ) == 0 )
+        {
+            const char* tracingDirName = "tracing";
+            const size_t tracingDirNameLen = strlen( tracingDirName );
+            auto debugFsPathLen = strlen( ent->mnt_dir );
+            // Typically there should be at most one debugfs, entry, but still possible to have multiple? hence realloc
+            ret = (char*)tracy_realloc( ret, debugFsPathLen + 1 + tracingDirNameLen + 1 );
+            memcpy( ret, ent->mnt_dir, debugFsPathLen );
+            ret[debugFsPathLen] = '/';
+            memcpy( ret + debugFsPathLen + 1, tracingDirName, tracingDirNameLen );
+            ret[debugFsPathLen + 1 + tracingDirNameLen] = '\0';
+            // Don't break to allow for tracefs to be found later as it is the preferred path
         }
     }
     endmntent( f );
