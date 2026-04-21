@@ -12,6 +12,7 @@
 #include "tracy_SPSCQueue.h"
 #include "TracyCallstack.hpp"
 #include "TracyKCore.hpp"
+#include "TracyMangle.hpp"
 #include "TracySysPower.hpp"
 #include "TracySysTime.hpp"
 #include "TracyFastVector.hpp"
@@ -85,7 +86,8 @@ struct GpuCtxWrapper
 };
 
 TRACY_API moodycamel::ConcurrentQueue<QueueItem>::ExplicitProducer* GetToken();
-TRACY_API Profiler& GetProfiler();
+TRACY_API Profiler& MANGLED_NAME_BASED_ON_CONFIG(GetProfiler)();
+tracy_force_inline Profiler& GetProfiler() { return MANGLED_NAME_BASED_ON_CONFIG(GetProfiler)(); }
 TRACY_API std::atomic<uint32_t>& GetLockCounter();
 TRACY_API std::atomic<uint8_t>& GetGpuCtxCounter();
 TRACY_API GpuCtxWrapper& GetGpuCtx();
