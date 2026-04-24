@@ -163,6 +163,7 @@ static int RunAttached( pid_t pid )
     printf( "Attaching to process %d", (int)pid );
     if( tracy::___tracy_magic_process_name[0] ) printf( " (%s)", tracy::___tracy_magic_process_name );
     printf( "...\n" );
+    fflush( stdout );
 
     if( !PreflightPerfEventOpen( pid ) ) return 1;
 
@@ -261,6 +262,7 @@ static int RunForked( int argc, char** argv )
     printf( "Profiling '%s' (pid %d)...\n",
             tracy::___tracy_magic_process_name[0] ? tracy::___tracy_magic_process_name : argv[0],
             (int)childPid );
+    fflush( stdout );
 
     if( !PreflightPerfEventOpen( childPid ) )
     {
