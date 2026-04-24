@@ -42,6 +42,7 @@ public:
     void End();
 
     bool Turn( TurnRole role, std::vector<nlohmann::json>::iterator it, const std::vector<nlohmann::json>::iterator& end, Think think, bool last );
+    void SetModelTimeLabel( const char* model, uint64_t duration_ns );
 
 private:
     void NormalScope();
@@ -59,6 +60,7 @@ private:
     int m_roleIdx;
 
     Markdown m_markdown;
+    std::string m_label;
 };
 
 }

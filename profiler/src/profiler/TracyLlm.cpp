@@ -549,6 +549,10 @@ void TracyLlm::Draw()
             }
         }
 
+        std::string model;
+        uint64_t timeStart = 0;
+        uint64_t timeEnd = 0;
+
         int turnIdx = 0;
         for( auto it = m_chat.begin(); it != m_chat.end(); ++it )
         {
@@ -566,6 +570,20 @@ void TracyLlm::Draw()
             if( role == TracyLlmChat::TurnRole::User )
             {
                 if( line.contains( "content" ) && line["content"].get_ref<const std::string&>().starts_with( "<attachment>\n" ) ) role = TracyLlmChat::TurnRole::Attachment;
+            }
+            else if( role == TracyLlmChat::TurnRole::Assistant && timeStart == 0 && line.contains( "model" ) && line.contains( "time_start" ) )
+            {
+                model = line["model"].get_ref<const std::string&>();
+                timeStart = line["time_start"].get<uint64_t>();
+            }
+            if( line.contains( "time_end" ) )
+            {
+                timeEnd = line["time_end"].get<uint64_t>();
+                if( timeStart != 0 )
+                {
+                    m_chatUi->SetModelTimeLabel( model.c_str(), timeEnd - timeStart );
+                    timeStart = 0;
+                }
             }
 
             ImGui::PushID( turnIdx++ );
