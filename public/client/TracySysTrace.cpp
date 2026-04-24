@@ -375,6 +375,7 @@ void SysTraceGetExternalName( uint64_t thread, const char*& threadName, const ch
 #    include <sys/types.h>
 #    include <sys/stat.h>
 #    include <sys/wait.h>
+#    include <dirent.h>
 #    include <fcntl.h>
 #    include <inttypes.h>
 #    include <limits>
@@ -411,6 +412,50 @@ static int s_ctxBufferIdx = 0;
 static RingBuffer* s_ring = nullptr;
 
 extern uint32_t ___tracy_magic_pid_override;
+
+// (pid, cpu) pair for a per-task perf event open. In self-profiling mode we
+// iterate one entry per CPU with pid = our tgid. In monitor mode we iterate
+// one entry per existing thread of the target, with cpu = -1, so inherit=1
+// can cover all descendants without multiplying ring buffers by CPU count.
+struct PerfIterTarget
+{
+    pid_t pid;
+    int cpu;
+};
+
+// Read /proc/<pid>/task/ and return the list of tids. Caller owns the buffer
+// (tracy_free). Returns 0 and sets *out = nullptr on failure.
+static int EnumerateTaskTids( pid_t pid, uint32_t** out )
+{
+    char path[64];
+    snprintf( path, sizeof( path ), "/proc/%d/task", (int)pid );
+    DIR* dir = opendir( path );
+    if( !dir )
+    {
+        *out = nullptr;
+        return 0;
+    }
+    size_t capacity = 32;
+    uint32_t* tids = (uint32_t*)tracy_malloc( sizeof( uint32_t ) * capacity );
+    size_t count = 0;
+    struct dirent* entry;
+    while( ( entry = readdir( dir ) ) != nullptr )
+    {
+        if( entry->d_name[0] == '.' ) continue;
+        char* endp;
+        unsigned long tid = strtoul( entry->d_name, &endp, 10 );
+        if( *endp != '\0' || tid == 0 ) continue;
+        if( count >= capacity )
+        {
+            capacity *= 2;
+            tids = (uint32_t*)tracy_realloc( tids, sizeof( uint32_t ) * capacity );
+        }
+        tids[count++] = (uint32_t)tid;
+    }
+    closedir( dir );
+    *out = tids;
+    return (int)count;
+}
 
 static const int ThreadHashSize = 4 * 1024;
 static uint32_t s_threadHash[ThreadHashSize] = {};
@@ -692,11 +737,39 @@ bool SysTraceStart( int64_t& samplingPeriod )
 
     s_numCpus = (int)std::thread::hardware_concurrency();
 
-    const auto maxNumBuffers = s_numCpus * (
+    // Build the per-task iteration list. In monitor mode this is all existing
+    // threads of the target (one event per thread, any CPU); in self-profiling
+    // it is per-CPU bound to our own tgid.
+    PerfIterTarget* iter = nullptr;
+    int numIter = 0;
+    if( ___tracy_magic_pid_override != 0 )
+    {
+        uint32_t* tids = nullptr;
+        const int numTids = EnumerateTaskTids( (pid_t)currentPid, &tids );
+        if( numTids == 0 )
+        {
+            TracyDebug( "Failed to enumerate threads of pid %u; target may have exited.", currentPid );
+            return false;
+        }
+        iter = (PerfIterTarget*)tracy_malloc( sizeof( PerfIterTarget ) * numTids );
+        for( int i=0; i<numTids; i++ ) iter[i] = { (pid_t)tids[i], -1 };
+        numIter = numTids;
+        tracy_free( tids );
+        TracyDebug( "Monitor mode: tracing %i existing threads of pid %u", numIter, currentPid );
+    }
+    else
+    {
+        iter = (PerfIterTarget*)tracy_malloc( sizeof( PerfIterTarget ) * s_numCpus );
+        for( int i=0; i<s_numCpus; i++ ) iter[i] = { (pid_t)currentPid, i };
+        numIter = s_numCpus;
+    }
+
+    const auto maxNumBuffers = numIter * (
         1 +     // software sampling
         2 +     // CPU cycles + instructions retired
         2 +     // cache reference + miss
-        2 +     // branch retired + miss
+        2       // branch retired + miss
+    ) + s_numCpus * (
         2 +     // context switches + waking ups
         1       // vsync
     );
@@ -726,14 +799,14 @@ bool SysTraceStart( int64_t& samplingPeriod )
     {
         TracyDebug( "Setup software sampling" );
         ProbePreciseIp( pe, currentPid );
-        for( int i=0; i<s_numCpus; i++ )
+        for( int i=0; i<numIter; i++ )
         {
-            int fd = perf_event_open( &pe, currentPid, i, -1, PERF_FLAG_FD_CLOEXEC );
+            int fd = perf_event_open( &pe, iter[i].pid, iter[i].cpu, -1, PERF_FLAG_FD_CLOEXEC );
             if( fd == -1 )
             {
                 pe.exclude_kernel = 1;
                 ProbePreciseIp( pe, currentPid );
-                fd = perf_event_open( &pe, currentPid, i, -1, PERF_FLAG_FD_CLOEXEC );
+                fd = perf_event_open( &pe, iter[i].pid, iter[i].cpu, -1, PERF_FLAG_FD_CLOEXEC );
                 if( fd == -1 )
                 {
                     TracyDebug( "  Failed to setup!");
@@ -745,7 +818,7 @@ bool SysTraceStart( int64_t& samplingPeriod )
             if( s_ring[s_numBuffers].IsValid() )
             {
                 s_numBuffers++;
-                TracyDebug( "  Core %i ok", i );
+                TracyDebug( "  Target %i ok", i );
             }
         }
     }
@@ -772,31 +845,31 @@ bool SysTraceStart( int64_t& samplingPeriod )
     {
         TracyDebug( "Setup sampling cycles + retirement" );
         ProbePreciseIp( pe, PERF_COUNT_HW_CPU_CYCLES, PERF_COUNT_HW_INSTRUCTIONS, currentPid );
-        for( int i=0; i<s_numCpus; i++ )
+        for( int i=0; i<numIter; i++ )
         {
-            const int fd = perf_event_open( &pe, currentPid, i, -1, PERF_FLAG_FD_CLOEXEC );
+            const int fd = perf_event_open( &pe, iter[i].pid, iter[i].cpu, -1, PERF_FLAG_FD_CLOEXEC );
             if( fd != -1 )
             {
                 new( s_ring+s_numBuffers ) RingBuffer( 64*1024, fd, EventCpuCycles );
                 if( s_ring[s_numBuffers].IsValid() )
                 {
                     s_numBuffers++;
-                    TracyDebug( "  Core %i ok", i );
+                    TracyDebug( "  Target %i ok", i );
                 }
             }
         }
 
         pe.config = PERF_COUNT_HW_INSTRUCTIONS;
-        for( int i=0; i<s_numCpus; i++ )
+        for( int i=0; i<numIter; i++ )
         {
-            const int fd = perf_event_open( &pe, currentPid, i, -1, PERF_FLAG_FD_CLOEXEC );
+            const int fd = perf_event_open( &pe, iter[i].pid, iter[i].cpu, -1, PERF_FLAG_FD_CLOEXEC );
             if( fd != -1 )
             {
                 new( s_ring+s_numBuffers ) RingBuffer( 64*1024, fd, EventInstructionsRetired );
                 if( s_ring[s_numBuffers].IsValid() )
                 {
                     s_numBuffers++;
-                    TracyDebug( "  Core %i ok", i );
+                    TracyDebug( "  Target %i ok", i );
                 }
             }
         }
@@ -812,31 +885,31 @@ bool SysTraceStart( int64_t& samplingPeriod )
             pe.precise_ip = 0;
             TracyDebug( "  CPU is GenuineIntel, forcing precise_ip down to 0" );
         }
-        for( int i=0; i<s_numCpus; i++ )
+        for( int i=0; i<numIter; i++ )
         {
-            const int fd = perf_event_open( &pe, currentPid, i, -1, PERF_FLAG_FD_CLOEXEC );
+            const int fd = perf_event_open( &pe, iter[i].pid, iter[i].cpu, -1, PERF_FLAG_FD_CLOEXEC );
             if( fd != -1 )
             {
                 new( s_ring+s_numBuffers ) RingBuffer( 64*1024, fd, EventCacheReference );
                 if( s_ring[s_numBuffers].IsValid() )
                 {
                     s_numBuffers++;
-                    TracyDebug( "  Core %i ok", i );
+                    TracyDebug( "  Target %i ok", i );
                 }
             }
         }
 
         pe.config = PERF_COUNT_HW_CACHE_MISSES;
-        for( int i=0; i<s_numCpus; i++ )
+        for( int i=0; i<numIter; i++ )
         {
-            const int fd = perf_event_open( &pe, currentPid, i, -1, PERF_FLAG_FD_CLOEXEC );
+            const int fd = perf_event_open( &pe, iter[i].pid, iter[i].cpu, -1, PERF_FLAG_FD_CLOEXEC );
             if( fd != -1 )
             {
                 new( s_ring+s_numBuffers ) RingBuffer( 64*1024, fd, EventCacheMiss );
                 if( s_ring[s_numBuffers].IsValid() )
                 {
                     s_numBuffers++;
-                    TracyDebug( "  Core %i ok", i );
+                    TracyDebug( "  Target %i ok", i );
                 }
             }
         }
@@ -847,31 +920,31 @@ bool SysTraceStart( int64_t& samplingPeriod )
     {
         TracyDebug( "Setup sampling CPU branch retirements + misses" );
         ProbePreciseIp( pe, PERF_COUNT_HW_BRANCH_INSTRUCTIONS, PERF_COUNT_HW_BRANCH_MISSES, currentPid );
-        for( int i=0; i<s_numCpus; i++ )
+        for( int i=0; i<numIter; i++ )
         {
-            const int fd = perf_event_open( &pe, currentPid, i, -1, PERF_FLAG_FD_CLOEXEC );
+            const int fd = perf_event_open( &pe, iter[i].pid, iter[i].cpu, -1, PERF_FLAG_FD_CLOEXEC );
             if( fd != -1 )
             {
                 new( s_ring+s_numBuffers ) RingBuffer( 64*1024, fd, EventBranchRetired );
                 if( s_ring[s_numBuffers].IsValid() )
                 {
                     s_numBuffers++;
-                    TracyDebug( "  Core %i ok", i );
+                    TracyDebug( "  Target %i ok", i );
                 }
             }
         }
 
         pe.config = PERF_COUNT_HW_BRANCH_MISSES;
-        for( int i=0; i<s_numCpus; i++ )
+        for( int i=0; i<numIter; i++ )
         {
-            const int fd = perf_event_open( &pe, currentPid, i, -1, PERF_FLAG_FD_CLOEXEC );
+            const int fd = perf_event_open( &pe, iter[i].pid, iter[i].cpu, -1, PERF_FLAG_FD_CLOEXEC );
             if( fd != -1 )
             {
                 new( s_ring+s_numBuffers ) RingBuffer( 64*1024, fd, EventBranchMiss );
                 if( s_ring[s_numBuffers].IsValid() )
                 {
                     s_numBuffers++;
-                    TracyDebug( "  Core %i ok", i );
+                    TracyDebug( "  Target %i ok", i );
                 }
             }
         }
@@ -983,6 +1056,8 @@ bool SysTraceStart( int64_t& samplingPeriod )
     }
 
     TracyDebug( "Ringbuffers in use: %i", s_numBuffers );
+
+    tracy_free( iter );
 
     traceActive.store( true, std::memory_order_relaxed );
     return true;
