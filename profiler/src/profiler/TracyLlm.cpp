@@ -1041,6 +1041,13 @@ void TracyLlm::SendMessage()
     bool needSummary = m_summary.empty();
     lock.unlock();
 
+    for( auto& msg : chat )
+    {
+        if( msg.contains( "time_start" ) ) msg.erase( "time_start" );
+        if( msg.contains( "time_end" ) ) msg.erase( "time_end" );
+        if( msg.contains( "model" ) ) msg.erase( "model" );
+    }
+
     if( needSummary )
     {
         auto query = chat;
@@ -1089,7 +1096,11 @@ void TracyLlm::SendMessage()
 
     try
     {
-        AddMessageBlocking( { { "role", "assistant" } } );
+        AddMessageBlocking( {
+            { "role", "assistant" },
+            { "time_start", std::chrono::duration_cast<std::chrono::nanoseconds>( std::chrono::steady_clock::now().time_since_epoch() ).count() },
+            { "model", m_api->GetModels()[m_modelIdx].name },
+        } );
 
         size_t i = 1;
         while( i < chat.size() )
@@ -1204,6 +1215,8 @@ bool TracyLlm::OnResponse( const nlohmann::json& json )
                 AppendResponse( "content", delta );
                 AppendResponse( "reasoning_content", delta );
                 AppendResponse( "tool_calls", delta );
+
+                m_chat.back()["time_end"] = std::chrono::duration_cast<std::chrono::nanoseconds>( std::chrono::steady_clock::now().time_since_epoch() ).count();
 
                 done = node.contains( "finish_reason" ) && !node["finish_reason"].empty();
             }
