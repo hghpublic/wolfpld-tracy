@@ -15,7 +15,8 @@ vx.xx.x (2026-xx-xx)
   - Flame graph window.
   - Call stack window.
   - Statistics window (sampling mode).
-- Single-line callstacks now have ellipsis at the end, if there are frames
+- External frames are now dimmed out in call stack tooltips.
+- Single-line call stacks now have ellipsis at the end, if there are frames
   remaining.
 - System tracing on Windows has been refactored to be more robust.
 - Tracing on Arm macOS will now have more precise timer readings.
@@ -63,6 +64,7 @@ vx.xx.x (2026-xx-xx)
     have the memory to spare, you can optionally load two models at once,
     setting the "fast" model to a smaller and much quicker one.
   - Chat topic description is now provided, based on the first user question.
+  - Each assistant reply is now labeled with used model and reply time.
 - Expanded LLM attachments.
   - You can now attach complete symbol assembly.
   - Entry call stacks can be now attached (previously it was only regular
