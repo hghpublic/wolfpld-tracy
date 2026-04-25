@@ -134,6 +134,7 @@ bool PrintTextWrapped( const char* text, const char* end, bool strikethrough, bo
     if( !end ) end = text + strlen( text );
 
     auto firstWord = text;
+    while( firstWord < end && *firstWord == ' ' ) firstWord++;
     while( firstWord < end && *firstWord != ' ' && *firstWord != '\n' ) firstWord++;
 
     const auto fontSize = ImGui::GetFontSize();
@@ -145,10 +146,17 @@ bool PrintTextWrapped( const char* text, const char* end, bool strikethrough, bo
     auto fwLen = ImGui::CalcTextSize( text, firstWord ).x;
     if( fwLen > left )
     {
+        const auto textPrev = text;
+        while( text < firstWord && *text == ' ' ) text++;
+
         const auto prev = left;
         ImGui::NewLine();
         left = ImGui::GetContentRegionAvail().x;
-        if( left == prev ) ImGui::SameLine( 0, 0 );
+        if( left == prev )
+        {
+            ImGui::SameLine( 0, 0 );    // undo NewLine
+            text = textPrev;
+        }
     }
 
     auto endLine = ImGui::GetFont()->CalcWordWrapPosition( fontSize, text, end, left );
