@@ -562,8 +562,8 @@ void TracyLlm::Draw()
             if( roleStr == "system" ) continue;
 
             TracyLlmChat::TurnRole role = TracyLlmChat::TurnRole::None;
-            if( roleStr == "user" ) role = TracyLlmChat::TurnRole::User;
-            else if( roleStr == "error" ) role = TracyLlmChat::TurnRole::Error;
+            if( roleStr == "user" ) { role = TracyLlmChat::TurnRole::User; timeStart = 0; }
+            else if( roleStr == "error" ) { role = TracyLlmChat::TurnRole::Error; timeStart = 0; }
             else if( roleStr == "assistant" || roleStr == "tool" ) role = TracyLlmChat::TurnRole::Assistant;
             else assert( false );
 
@@ -581,11 +581,7 @@ void TracyLlm::Draw()
                 if( line.contains( "time_end" ) )
                 {
                     timeEnd = line["time_end"].get<uint64_t>();
-                    if( timeStart != 0 )
-                    {
-                        m_chatUi->SetModelTimeLabel( model.c_str(), timeEnd - timeStart );
-                        timeStart = 0;
-                    }
+                    if( timeStart != 0 ) m_chatUi->SetModelTimeLabel( model.c_str(), timeEnd - timeStart );
                 }
             }
 
